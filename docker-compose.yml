@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: admin_bot
+    restart: always  # Если бот упадет или сервер перезагрузится — он включится сам
+    volumes:
+      - ./data:/app/data
