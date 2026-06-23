@@ -4,6 +4,11 @@ services:
   bot:
     build: .
     container_name: admin_bot
-    restart: always  # Если бот упадет или сервер перезагрузится — он включится сам
+    restart: always
+    env_file:
+      - .env
     volumes:
       - ./data:/app/data
+      # Приватный SSH-ключ для доступа к управляемым серверам (read-only).
+      # Раскомментируйте, если перешли на ключевую аутентификацию:
+      # - ./secrets/id_ed25519:/app/secrets/id_ed25519:ro

@@ -1,96 +1,86 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+
 from services.checker import check_server
 from services.store import load_servers_sync, save_cache
 from services.ssh import execute_command
 
+logger = logging.getLogger(__name__)
+
 TZ_GMT6 = timezone(timedelta(hours=6))
+SCAN_INTERVAL = 300  # 5 минут
 
 
 async def update_statuses_task():
-    """Бесконечный цикл обновления статусов"""
-    logging.info("⏳ Запущен планировщик проверки серверов...")
+    """Бесконечный цикл обновления статусов всех серверов."""
+    logger.info("⏳ Запущен планировщик проверки серверов...")
     while True:
         try:
             servers = load_servers_sync()
+            keys = list(servers.keys())
+            tasks = [check_server(k, servers[k]) for k in keys]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
             cache_data = {}
+            for key, res in zip(keys, results):
+                if isinstance(res, Exception):
+                    logger.error("Ошибка проверки %s: %s", key, res)
+                    cache_data[key] = f"<b>🖥 {servers[key].get('ip', key)}:</b>\n❌ Ошибка опроса"
+                else:
+                    cache_data[key] = res
 
-            # Проверяем все сервера параллельно
-            tasks = []
-            keys = []
-
-            for key, data in servers.items():
-                keys.append(key)
-                # Вызываем ту функцию, которая возвращает красивый текст
-                tasks.append(check_server(key, data))
-
-            # Ждем выполнения всех проверок
-            results = await asyncio.gather(*tasks)
-
-            # Собираем словарь { "server_1": "HTML текст статуса", ... }
-            for i, result in enumerate(results):
-                cache_data[keys[i]] = result
-
-            # Сохраняем в файл
             await save_cache(cache_data)
-            logging.info("✅ Кэш статусов обновлен")
+            logger.info("✅ Кэш статусов обновлён (%d серверов)", len(keys))
 
         except Exception as e:
-            logging.error(f"Ошибка в планировщике: {e}")
+            logger.exception("Ошибка в планировщике: %s", e)
 
-        # Спим 300 секунд (5 минут)
-        await asyncio.sleep(300)
+        await asyncio.sleep(SCAN_INTERVAL)
 
 
 async def clean_chromium_cache_job():
-    """Фоновая задача для очистки кэша Chromium каждый день в 04:00 утра"""
+    """Ночная очистка кэша Chromium каждый день в 04:00 по Бишкеку (GMT+6)."""
     while True:
-        # 1. Высчитываем время до ближайших 04:00
         now = datetime.now(TZ_GMT6)
-        target_time = now.replace(hour=4, minute=0, second=0, microsecond=0)
+        target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
 
-        # Если сейчас уже больше 04:00, планируем на завтрашнее утро
-        if now >= target_time:
-            target_time += timedelta(days=1)
-
-        # Считаем разницу в секундах
-        sleep_seconds = (target_time - now).total_seconds()
-
-        logging.info(
-            f"⏳ Очистка кэша запланирована на: {target_time.strftime('%Y-%m-%d %H:%M:%S')} (через {sleep_seconds / 3600:.2f} часов)")
-
-        # 2. Бот "засыпает" в этой конкретной задаче до нужного времени
+        sleep_seconds = (target - now).total_seconds()
+        logger.info(
+            "⏳ Очистка кэша запланирована на %s (через %.2f ч)",
+            target.strftime("%Y-%m-%d %H:%M:%S"), sleep_seconds / 3600,
+        )
         await asyncio.sleep(sleep_seconds)
 
-        # 3. Время пришло — выполняем очистку
-        logging.info("🧹 Начинаю ночную очистку кэша Chromium на всех серверах...")
-
+        logger.info("🧹 Начинаю ночную очистку кэша Chromium...")
         servers = load_servers_sync()
 
         for key, server in servers.items():
-            bots = server.get('bots', ['bot1', 'bot2', 'bot3'])
-            path = server.get('path', '/root/servers_admin_bot')
+            bots = server.get("bots", ["bot1", "bot2", "bot3"])
+            path = server.get("path", "/root/servers_admin_bot")
 
-            # Собираем команды в одну цепочку
-            commands = [f"cd {path}"]
-
+            sequences = []
             for bot_name in bots:
-                cmd_stop = f"docker stop {bot_name}"
-                cmd_clean = f"find ./sessions/{bot_name} -type d \\( -name 'Cache' -o -name 'Code Cache' -o -name 'GPUCache' -o -name 'CacheStorage' \\) -exec rm -rf {{}} + 2>/dev/null"
-                cmd_start = f"docker start {bot_name}"
+                stop = f"docker compose stop {bot_name}"
+                clean = (
+                    f"find ./sessions/{bot_name} -type d "
+                    f"\\( -name 'Cache' -o -name 'Code Cache' "
+                    f"-o -name 'GPUCache' -o -name 'CacheStorage' \\) "
+                    f"-exec rm -rf {{}} + 2>/dev/null"
+                )
+                start = f"docker compose start {bot_name}"
+                sequences.append(f"( {stop} ; {clean} ; {start} )")
 
-                bot_sequence = f"( {cmd_stop} ; {cmd_clean} ; {cmd_start} )"
-                commands.append(bot_sequence)
+            full_cmd = f"cd {path} && " + " ; ".join(sequences)
 
-            full_cmd = f"cd {path} && " + " ; ".join(commands[1:])
-
-            logging.info(f"Отправляю команду очистки на сервер {server['name']}...")
+            logger.info("Отправляю команду очистки на %s...", server.get("name", key))
             status, out, err = await asyncio.to_thread(execute_command, server, full_cmd)
-
             if status != 0:
-                logging.error(f"❌ Ошибка очистки на {server['name']}: {err}")
+                logger.error("❌ Ошибка очистки на %s: %s", server.get("name", key), err)
             else:
-                logging.info(f"✅ Сервер {server['name']} успешно очищен.")
+                logger.info("✅ Сервер %s очищен.", server.get("name", key))
 
-        logging.info("🏁 Ночная очистка кэша завершена!")
+        logger.info("🏁 Ночная очистка завершена.")
