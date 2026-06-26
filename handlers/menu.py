@@ -74,7 +74,10 @@ async def server_menu_handler(call: types.CallbackQuery):
     cached_text = await get_cached_status(key)
     if cached_text:
         text = f"{cached_text}\n\n<i>(Обновляется каждые 5 мин)</i>\n👇 Выберите действие:"
-        await call.message.edit_text(text, reply_markup=server_actions_menu(key))
+        try:
+            await call.message.edit_text(text, reply_markup=server_actions_menu(key))
+        except Exception:
+            pass  # сообщение уже с этим контентом (двойной тап) — игнорируем
     else:
         await call.message.edit_text(f"⏳ Сканирую {server['name']}...", reply_markup=None)
         report = await check_server(key, server)
