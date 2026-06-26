@@ -102,14 +102,12 @@ async def clean_chromium_cache_job():
 
 async def _send_billing_alerts(accounts: list[dict]) -> None:
     """
-    Шлёт алерт по каждому проблемному аккаунту (не active или не опросился).
-    Антиспам: повторно по тому же аккаунту не шлём, пока он не вернётся
-    в норму. Когда аккаунт снова active — снимаем его из набора, чтобы
-    среагировать на следующую блокировку.
+    Шлёт алерт по каждому проблемному аккаунту (задолженность или не опросился).
+    Антиспам: повторно по тому же аккаунту не шлём, пока долг не исчезнет.
     """
     for acc in accounts:
         label = acc["label"]
-        problem = (not acc["ok"]) or (acc["status"] != "active")
+        problem = (not acc["ok"]) or (acc["balance_status"] == "debt")
 
         if not problem:
             _BILLING_ALERTS_SENT.discard(label)
@@ -121,12 +119,10 @@ async def _send_billing_alerts(accounts: list[dict]) -> None:
         if not acc["ok"]:
             reason = f"не удалось опросить аккаунт ({acc['error']})"
         else:
-            status_map = {
-                "warning": "аккаунт помечен как <b>warning</b> — есть проблема с оплатой",
-                "locked": "аккаунт <b>ЗАБЛОКИРОВАН</b> (locked) — сервера могут быть остановлены",
-            }
-            reason = status_map.get(
-                acc["status"], f"нестандартный статус: {acc['status']}"
+            from services.billing import _money  # локальный импорт, без цикла
+            reason = (
+                f"есть задолженность <b>{_money(acc['account_balance'])}</b> — "
+                f"списание не прошло, аккаунт может быть заблокирован"
             )
 
         msg = (
@@ -135,10 +131,10 @@ async def _send_billing_alerts(accounts: list[dict]) -> None:
             f"⚠️ {reason}\n"
         )
         if acc["ok"]:
-            from services.billing import _money  # локальный импорт, без цикла
+            from services.billing import _money
             msg += (
                 f"💸 Потрачено за месяц: <b>{_money(acc['month_to_date'])}</b>\n\n"
-                f"❗️ Срочно проверьте оплату в личном кабинете DO, "
+                f"❗️ Срочно оплатите задолженность в личном кабинете DO, "
                 f"чтобы избежать остановки серверов."
             )
         else:
