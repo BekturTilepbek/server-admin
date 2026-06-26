@@ -40,6 +40,34 @@ async def billing_test_cmd(message: types.Message):
     await message.answer("✅ Готово — проверьте группу.")
 
 
+# ВРЕМЕННАЯ КОМАНДА ДЛЯ ОТЛАДКИ — удалить после проверки
+@router.message(Command("billing_debug"))
+async def billing_debug_cmd(message: types.Message):
+    """Показывает сырые данные billing_history для диагностики."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    from config import DO_ACCOUNTS
+    from services.billing import _get_json
+    import html
+
+    for label, token in DO_ACCOUNTS:
+        try:
+            data = await _get_json("/customers/my/billing_history", token)
+            entries = data.get("billing_history", [])
+            if not entries:
+                await message.answer(f"<b>{html.escape(label)}</b>: billing_history пуст")
+                continue
+            lines = [f"<b>{html.escape(label)}</b> — первые {min(5, len(entries))} из {len(entries)}:"]
+            for e in entries[:5]:
+                t = html.escape(str(e.get("type", "?")))
+                d = html.escape(str(e.get("date", "?")))
+                a = html.escape(str(e.get("amount", "?")))
+                lines.append(f"  type=<code>{t}</code> date=<code>{d}</code> amount=<code>{a}</code>")
+            await message.answer("\n".join(lines))
+        except Exception as e:
+            await message.answer(f"<b>{html.escape(label)}</b>: ошибка — <code>{html.escape(str(e))}</code>")
+
+
 @router.callback_query(F.data == "get_bot_sys_logs")
 async def show_bot_logs(call: types.CallbackQuery):
     if call.from_user.id != ADMIN_ID:
