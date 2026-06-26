@@ -65,10 +65,11 @@ def _balance_status(account_balance: str | None) -> str:
 
 def _last_payment_from_history(billing_history: list[dict]) -> dict | None:
     """
-    Ищет самый свежий успешный платёж в billing_history.
+    Ищет самый свежий платёж в billing_history.
 
-    DO возвращает записи типов: 'Payment', 'Invoice', 'Credit', ...
-    Нас интересует тип 'Payment' с положительной суммой.
+    DO возвращает платежи с type='Payment' и ОТРИЦАТЕЛЬНОЙ суммой
+    (списание с карты = отток денег со счёта клиента в пользу DO).
+    Например: amount="-327.55" означает что списали $327.55.
 
     Возвращает словарь вида:
       {"date": datetime, "amount": str, "description": str}
@@ -80,26 +81,25 @@ def _last_payment_from_history(billing_history: list[dict]) -> dict | None:
     for entry in billing_history:
         if entry.get("type") != "Payment":
             continue
-        # amount приходит как строка, может быть отрицательным (возврат)
-        try:
-            amount = float(entry.get("amount", "0"))
-        except (TypeError, ValueError):
-            continue
-        if amount <= 0:
-            continue
 
         date_str = entry.get("date", "")
         try:
-            # формат DO: "2026-06-01T00:00:00Z"
             dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             continue
 
         if latest_dt is None or dt > latest_dt:
             latest_dt = dt
+            # Показываем абсолютную сумму (без минуса) — для читаемости
+            raw_amount = entry.get("amount", "0")
+            try:
+                display_amount = str(abs(float(raw_amount)))
+            except (TypeError, ValueError):
+                display_amount = raw_amount
+
             latest = {
                 "date": dt,
-                "amount": entry.get("amount", "—"),
+                "amount": display_amount,
                 "description": entry.get("description", ""),
             }
 
