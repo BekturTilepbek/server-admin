@@ -32,3 +32,30 @@ GROUP_CHAT_ID: int = int(_required("GROUP_CHAT_ID"))
 # MASTER_KEY читается напрямую в services/crypto.py — здесь только проверяем
 # наличие, чтобы упасть на старте с понятной ошибкой, а не в рантайме.
 _required("MASTER_KEY")
+
+
+# --- БИЛЛИНГ DIGITALOCEAN ---
+# Формат: "почта1:токен1,почта2:токен2,почта3:токен3"
+# Почта (метка) и токен разделяются ПЕРВЫМ двоеточием, аккаунты — запятой.
+# В email есть '@', но нет ':' и ',', поэтому парсинг однозначный.
+# Переменная необязательная — если её нет, фича биллинга просто молчит.
+def _parse_do_accounts(raw: str) -> list[tuple[str, str]]:
+    accounts: list[tuple[str, str]] = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        label, sep, token = chunk.partition(":")
+        label, token = label.strip(), token.strip()
+        if not sep or not token:
+            raise RuntimeError(
+                f"Некорректная запись в DO_ACCOUNTS: '{chunk}'. "
+                f"Ожидается формат 'почта:токен'."
+            )
+        accounts.append((label, token))
+    return accounts
+
+
+DO_ACCOUNTS: list[tuple[str, str]] = _parse_do_accounts(
+    os.environ.get("DO_ACCOUNTS", "")
+)

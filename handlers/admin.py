@@ -7,8 +7,25 @@ from aiogram.filters import Command, CommandObject
 from config import ADMIN_ID
 from keyboards import back_to_main_kb
 from services.store import load_servers_sync, save_server
+from services.billing import get_all_accounts_billing, format_digest
 
 router = Router()
+
+
+@router.callback_query(F.data == "billing_do")
+async def show_billing(call: types.CallbackQuery):
+    # Дублируем проверку: кнопка скрыта для не-админов, но callback может
+    # прийти напрямую, поэтому валидируем доступ и здесь.
+    if call.from_user.id != ADMIN_ID:
+        return await call.answer("Только для админа!", show_alert=True)
+
+    await call.message.edit_text(
+        "⏳ Запрашиваю биллинг DigitalOcean...", reply_markup=None
+    )
+    accounts = await get_all_accounts_billing()
+    await call.message.edit_text(
+        format_digest(accounts), reply_markup=back_to_main_kb()
+    )
 
 
 @router.callback_query(F.data == "get_bot_sys_logs")

@@ -5,11 +5,23 @@ from datetime import datetime, timedelta, timezone
 from services.checker import check_server
 from services.store import load_servers_sync, save_cache
 from services.ssh import execute_command
+from services.billing import get_all_accounts_billing, format_digest, has_problem
+
+from loader import bot
+from config import GROUP_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
 TZ_GMT6 = timezone(timedelta(hours=6))
 SCAN_INTERVAL = 300  # 5 минут
+
+# --- БИЛЛИНГ DO ---
+BILLING_DIGEST_HOUR = 10        # ежедневный дайджест в 10:00 по Бишкеку (GMT+6)
+BILLING_CHECK_INTERVAL = 1800   # проверка статуса на алерты каждые 30 минут
+# Антиспам: метки аккаунтов, по которым уже отправлен алерт о проблеме.
+# Сбрасывается, когда аккаунт снова active — чтобы повторно среагировать
+# на новую блокировку.
+_BILLING_ALERTS_SENT: set[str] = set()
 
 
 async def update_statuses_task():
@@ -84,3 +96,101 @@ async def clean_chromium_cache_job():
                 logger.info("✅ Сервер %s очищен.", server.get("name", key))
 
         logger.info("🏁 Ночная очистка завершена.")
+
+
+# --------------------- БИЛЛИНГ DIGITALOCEAN ---------------------
+
+async def _send_billing_alerts(accounts: list[dict]) -> None:
+    """
+    Шлёт алерт по каждому проблемному аккаунту (не active или не опросился).
+    Антиспам: повторно по тому же аккаунту не шлём, пока он не вернётся
+    в норму. Когда аккаунт снова active — снимаем его из набора, чтобы
+    среагировать на следующую блокировку.
+    """
+    for acc in accounts:
+        label = acc["label"]
+        problem = (not acc["ok"]) or (acc["status"] != "active")
+
+        if not problem:
+            _BILLING_ALERTS_SENT.discard(label)
+            continue
+
+        if label in _BILLING_ALERTS_SENT:
+            continue  # уже предупреждали
+
+        if not acc["ok"]:
+            reason = f"не удалось опросить аккаунт ({acc['error']})"
+        else:
+            status_map = {
+                "warning": "аккаунт помечен как <b>warning</b> — есть проблема с оплатой",
+                "locked": "аккаунт <b>ЗАБЛОКИРОВАН</b> (locked) — сервера могут быть остановлены",
+            }
+            reason = status_map.get(
+                acc["status"], f"нестандартный статус: {acc['status']}"
+            )
+
+        msg = (
+            f"🚨 <b>Биллинг DigitalOcean: внимание!</b>\n\n"
+            f"📧 <b>Аккаунт:</b> {label}\n"
+            f"⚠️ {reason}\n"
+        )
+        if acc["ok"]:
+            from services.billing import _money  # локальный импорт, без цикла
+            msg += (
+                f"💸 Потрачено за месяц: <b>{_money(acc['month_to_date'])}</b>\n\n"
+                f"❗️ Срочно проверьте оплату в личном кабинете DO, "
+                f"чтобы избежать остановки серверов."
+            )
+        else:
+            msg += "\n❗️ Проверьте токен и доступность аккаунта."
+
+        try:
+            await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+            _BILLING_ALERTS_SENT.add(label)
+            logger.info("Биллинг-алерт отправлен для %s", label)
+        except Exception as e:
+            logger.error("Не удалось отправить биллинг-алерт (%s): %s", label, e)
+
+
+async def billing_alert_task():
+    """Периодическая проверка статусов аккаунтов DO на предмет проблем."""
+    logger.info("⏳ Запущен мониторинг биллинга DigitalOcean...")
+    while True:
+        try:
+            accounts = await get_all_accounts_billing()
+            if accounts and has_problem(accounts):
+                await _send_billing_alerts(accounts)
+            elif accounts:
+                # всё в норме — чистим антиспам-набор
+                _BILLING_ALERTS_SENT.clear()
+        except Exception as e:
+            logger.exception("Ошибка в мониторинге биллинга: %s", e)
+
+        await asyncio.sleep(BILLING_CHECK_INTERVAL)
+
+
+async def billing_digest_task():
+    """Ежедневный дайджест по биллингу DO в 10:00 по Бишкеку (GMT+6)."""
+    while True:
+        now = datetime.now(TZ_GMT6)
+        target = now.replace(
+            hour=BILLING_DIGEST_HOUR, minute=0, second=0, microsecond=0
+        )
+        if now >= target:
+            target += timedelta(days=1)
+
+        sleep_seconds = (target - now).total_seconds()
+        logger.info(
+            "⏳ Дайджест биллинга запланирован на %s (через %.2f ч)",
+            target.strftime("%Y-%m-%d %H:%M:%S"), sleep_seconds / 3600,
+        )
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            accounts = await get_all_accounts_billing()
+            if accounts:
+                text = format_digest(accounts)
+                await bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+                logger.info("✅ Ежедневный дайджест биллинга отправлен.")
+        except Exception as e:
+            logger.exception("Ошибка при отправке дайджеста биллинга: %s", e)

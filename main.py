@@ -5,7 +5,12 @@ from aiogram import Dispatcher
 
 from loader import bot
 from handlers import main_router
-from utils.scheduler import update_statuses_task, clean_chromium_cache_job
+from utils.scheduler import (
+    update_statuses_task,
+    clean_chromium_cache_job,
+    billing_alert_task,
+    billing_digest_task,
+)
 from middlewares.auth import AuthMiddleware
 
 # Держим ссылки на фоновые задачи, чтобы их не собрал GC
@@ -59,6 +64,8 @@ async def main():
 
     spawn(update_statuses_task, "update_statuses")
     spawn(clean_chromium_cache_job, "clean_chromium_cache")
+    spawn(billing_alert_task, "billing_alert")
+    spawn(billing_digest_task, "billing_digest")
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

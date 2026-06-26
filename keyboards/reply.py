@@ -45,6 +45,9 @@ def main_menu(servers: dict, user_id: int, page: int = 0) -> InlineKeyboardMarku
 
     if user_id == ADMIN_ID:
         builder.row(InlineKeyboardButton(
+            text="💳 Биллинг DO", callback_data="billing_do"
+        ))
+        builder.row(InlineKeyboardButton(
             text="📑 Логи самого бота", callback_data="get_bot_sys_logs"
         ))
 
