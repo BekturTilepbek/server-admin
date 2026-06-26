@@ -4,18 +4,17 @@ import aiofiles
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 
-from config import ADMIN_ID
+from config import ADMIN_ID, GROUP_CHAT_ID
 from keyboards import back_to_main_kb
 from services.store import load_servers_sync, save_server
 from services.billing import get_all_accounts_billing, format_digest
+from loader import bot
 
 router = Router()
 
 
 @router.callback_query(F.data == "billing_do")
 async def show_billing(call: types.CallbackQuery):
-    # Дублируем проверку: кнопка скрыта для не-админов, но callback может
-    # прийти напрямую, поэтому валидируем доступ и здесь.
     if call.from_user.id != ADMIN_ID:
         return await call.answer("Только для админа!", show_alert=True)
 
@@ -26,6 +25,19 @@ async def show_billing(call: types.CallbackQuery):
     await call.message.edit_text(
         format_digest(accounts), reply_markup=back_to_main_kb()
     )
+
+
+# ВРЕМЕННАЯ КОМАНДА ДЛЯ ТЕСТА — удалить после проверки
+@router.message(Command("billing_test"))
+async def billing_test_cmd(message: types.Message):
+    """Отправляет в группу то же сообщение, что и ежедневный дайджест."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("⏳ Отправляю биллинг-дайджест в группу...")
+    accounts = await get_all_accounts_billing()
+    text = format_digest(accounts)
+    await bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+    await message.answer("✅ Готово — проверьте группу.")
 
 
 @router.callback_query(F.data == "get_bot_sys_logs")
