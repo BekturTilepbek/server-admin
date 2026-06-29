@@ -17,7 +17,9 @@ CONNECT_TIMEOUT = 10
 EXEC_TIMEOUT = 60  # макс. время выполнения команды, чтобы не зависнуть навечно
 
 
-def execute_command(server_data: dict, command: str) -> tuple[int, str, str]:
+def execute_command(
+    server_data: dict, command: str, exec_timeout: int = EXEC_TIMEOUT
+) -> tuple[int, str, str]:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -39,9 +41,9 @@ def execute_command(server_data: dict, command: str) -> tuple[int, str, str]:
 
     try:
         client.connect(**connect_kwargs)
-        stdin, stdout, stderr = client.exec_command(command, timeout=EXEC_TIMEOUT)
+        stdin, stdout, stderr = client.exec_command(command, timeout=exec_timeout)
         # settimeout на канал — защита от зависшего read()
-        stdout.channel.settimeout(EXEC_TIMEOUT)
+        stdout.channel.settimeout(exec_timeout)
         exit_status = stdout.channel.recv_exit_status()
         out = stdout.read().decode("utf-8", errors="ignore")
         err = stderr.read().decode("utf-8", errors="ignore")

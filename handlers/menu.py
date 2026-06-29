@@ -8,6 +8,7 @@ from services.store import load_servers_sync, get_cached_status
 from services.names import get_bot_name
 from keyboards.reply import main_menu, back_to_main_kb, server_actions_menu
 from services import check_all_servers, check_server, clear_cache
+from config import ADMIN_ID
 
 router = Router()
 
@@ -75,7 +76,7 @@ async def server_menu_handler(call: types.CallbackQuery):
     if cached_text:
         text = f"{cached_text}\n\n<i>(Обновляется каждые 5 мин)</i>\n👇 Выберите действие:"
         try:
-            await call.message.edit_text(text, reply_markup=server_actions_menu(key))
+            await call.message.edit_text(text, reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID))
         except Exception:
             pass  # сообщение уже с этим контентом (двойной тап) — игнорируем
     else:
@@ -83,7 +84,7 @@ async def server_menu_handler(call: types.CallbackQuery):
         report = await check_server(key, server)
         await call.message.edit_text(
             f"{report}\n\n👇 Выберите действие:",
-            reply_markup=server_actions_menu(key),
+            reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID),
         )
 
 
@@ -100,7 +101,7 @@ async def refresh_server_handler(call: types.CallbackQuery):
     report = await check_server(key, server)
     await call.message.edit_text(
         f"{report}\n\n👇 Выберите действие:",
-        reply_markup=server_actions_menu(key),
+        reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID),
     )
 
 
