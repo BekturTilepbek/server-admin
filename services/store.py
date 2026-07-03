@@ -5,6 +5,14 @@
 - В памяти держим расшифрованную версию с инвалидацией по mtime файла,
   чтобы не читать и не дешифровать диск на каждый хендлер/мидлварь.
 - cache.json не шифруется (там только тексты статусов).
+
+Запись на диск — АТОМАРНАЯ: пишем во временный файл, fsync, затем
+os.replace() (атомарная замена в рамках одной ФС). Так файл никогда
+не останется "недописанным", даже если процесс упадёт посреди записи.
+
+Все операции read-modify-write (save_server/delete_server) выполняются
+под блокировкой на файл целиком, чтобы два параллельных редактирования
+не затирали друг друга.
 """
 import os
 import json
@@ -34,6 +42,16 @@ def _lock(path: str) -> asyncio.Lock:
     return _locks[path]
 
 
+def _write_bytes_atomic_sync(path: str, data: bytes) -> None:
+    """Атомарная запись байтов на диск (синхронно, вызывать через to_thread)."""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)  # атомарно в пределах одной файловой системы
+
+
 def _load_encrypted(path: str, default: Any) -> Any:
     """Синхронное чтение зашифрованного JSON с кэшем по mtime."""
     if not os.path.exists(path):
@@ -57,14 +75,19 @@ def _load_encrypted(path: str, default: Any) -> Any:
         return default
 
 
-async def _save_encrypted(path: str, obj: Any) -> None:
+async def _write_encrypted_nolock(path: str, obj: Any) -> None:
+    """Шифрует и атомарно пишет. НЕ берёт блокировку (вызывать под _lock)."""
     payload = json.dumps(obj, indent=4, ensure_ascii=False).encode("utf-8")
     token = encrypt_bytes(payload)
-    async with _lock(path):
-        async with aiofiles.open(path, "wb") as f:
-            await f.write(token)
+    await asyncio.to_thread(_write_bytes_atomic_sync, path, token)
     # Инвалидируем кэш — при следующем чтении подхватится новый mtime
     _mem_cache.pop(path, None)
+
+
+async def _save_encrypted(path: str, obj: Any) -> None:
+    """Запись целого объекта под блокировкой файла."""
+    async with _lock(path):
+        await _write_encrypted_nolock(path, obj)
 
 
 # ---------------- USERS ----------------
@@ -95,16 +118,19 @@ def load_servers_sync() -> dict:
 
 
 async def save_server(key: str, data: dict) -> dict:
-    servers = load_servers_sync()
-    servers[key] = data
-    await _save_encrypted(SERVERS_FILE, servers)
+    """Атомарный read-modify-write под блокировкой файла серверов."""
+    async with _lock(SERVERS_FILE):
+        servers = dict(_load_encrypted(SERVERS_FILE, {}))  # копия, не трогаем кэш
+        servers[key] = data
+        await _write_encrypted_nolock(SERVERS_FILE, servers)
     return servers
 
 
 async def delete_server(key: str) -> dict:
-    servers = load_servers_sync()
-    servers.pop(key, None)
-    await _save_encrypted(SERVERS_FILE, servers)
+    async with _lock(SERVERS_FILE):
+        servers = dict(_load_encrypted(SERVERS_FILE, {}))
+        servers.pop(key, None)
+        await _write_encrypted_nolock(SERVERS_FILE, servers)
     return servers
 
 
@@ -112,8 +138,11 @@ async def delete_server(key: str) -> dict:
 
 async def save_cache(data: dict) -> None:
     async with _lock(CACHE_FILE):
-        async with aiofiles.open(CACHE_FILE, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(data, indent=4, ensure_ascii=False))
+        await asyncio.to_thread(
+            _write_bytes_atomic_sync,
+            CACHE_FILE,
+            json.dumps(data, indent=4, ensure_ascii=False).encode("utf-8"),
+        )
 
 
 async def get_cached_status(server_key: str | None = None):

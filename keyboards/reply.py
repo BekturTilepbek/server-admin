@@ -45,7 +45,7 @@ def main_menu(servers: dict, user_id: int, page: int = 0) -> InlineKeyboardMarku
 
     if user_id == ADMIN_ID:
         builder.row(InlineKeyboardButton(
-            text="💳 Биллинг DO", callback_data="billing_do"
+            text="⚙️ Управление (сервера / юзеры)", callback_data="mng_root"
         ))
         builder.row(InlineKeyboardButton(
             text="📑 Логи самого бота", callback_data="get_bot_sys_logs"
@@ -60,18 +60,14 @@ def back_to_main_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def server_actions_menu(server_key: str, is_admin: bool = False) -> InlineKeyboardMarkup:
+def server_actions_menu(server_key: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Рестарт ВСЕГО сервера", callback_data=f"run_normal_{server_key}")
+    builder.button(text="🔄 Рестарт определенного бота", callback_data=f"list_restart_{server_key}")
     builder.button(text="🔌 Отвязать WhatsApp", callback_data=f"list_unlink_{server_key}")
     builder.button(text="📋 Логи", callback_data=f"list_bots_{server_key}")
     builder.button(text="⚙️ Обновить статус (Real-time)", callback_data=f"refresh_{server_key}")
     builder.button(text="🧹 Очистить кэш", callback_data=f"start_clearchat_{server_key}")
-    if is_admin:
-        builder.button(
-            text="♻️ Рестарт без кэша (--no-cache)",
-            callback_data=f"run_nocache_{server_key}",
-        )
     builder.button(text="⬅️ Назад", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -84,6 +80,18 @@ def bot_selection_menu(server_data: dict, server_key: str) -> InlineKeyboardMark
     for b in bots:
         name = get_bot_name(server_key, server_data, b)
         builder.button(text=f"🤖 {name}", callback_data=f"getlogs_{b}_{server_key}")
+    builder.button(text="⬅️ Назад", callback_data=f"select_server_{server_key}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def bot_restart_menu(server_data: dict, server_key: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    bots = server_data.get("bots", STANDARD_BOTS)
+    builder.button(text="🖥️ Central-admin", callback_data=f"runbot_central-admin_{server_key}")
+    for b in bots:
+        name = get_bot_name(server_key, server_data, b)
+        builder.button(text=f"🔄 {name}", callback_data=f"runbot_{b}_{server_key}")
     builder.button(text="⬅️ Назад", callback_data=f"select_server_{server_key}")
     builder.adjust(1)
     return builder.as_markup()

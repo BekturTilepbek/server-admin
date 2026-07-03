@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -6,11 +8,16 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from services.store import load_servers_sync, get_cached_status
 from services.names import get_bot_name
+from services.audit import actor_label
 from keyboards.reply import main_menu, back_to_main_kb, server_actions_menu
 from services import check_all_servers, check_server, clear_cache
-from utils.telegram import chunk_report
 
 router = Router()
+logger = logging.getLogger(__name__)
+
+
+def _actor(user: types.User) -> str:
+    return actor_label(user.id, user.full_name)
 
 
 class ClearChatState(StatesGroup):
@@ -59,21 +66,10 @@ async def noop_handler(call: types.CallbackQuery):
 # --- ПРОВЕРКА ВСЕХ НОМЕРОВ (ОНЛАЙН) ---
 @router.callback_query(F.data == "check_all_now")
 async def check_all_handler(call: types.CallbackQuery):
+    logger.info("📊 %s: запустил проверку статуса ВСЕХ серверов", _actor(call.from_user))
     await call.message.edit_text("⏳ Сканирую все сервера в реальном времени...", reply_markup=None)
     report = await check_all_servers()
-
-    # Отчёт по 30+ серверам легко превышает лимит Telegram в 4096 символов
-    # (MESSAGE_TOO_LONG), поэтому режем на безопасные части по границам
-    # блоков "сервер-отчёт" и отправляем несколькими сообщениями.
-    chunks = chunk_report(report) or ["⚠️ Нет данных для отображения."]
-    last_index = len(chunks) - 1
-
-    for i, chunk in enumerate(chunks):
-        markup = back_to_main_kb() if i == last_index else None
-        if i == 0:
-            await call.message.edit_text(chunk, reply_markup=markup)
-        else:
-            await call.message.answer(chunk, reply_markup=markup)
+    await call.message.edit_text(report, reply_markup=back_to_main_kb())
 
 
 @router.callback_query(F.data.startswith("select_server_"))
@@ -83,6 +79,8 @@ async def server_menu_handler(call: types.CallbackQuery):
     server = servers.get(key)
     if not server:
         return await call.answer("Сервер не найден!", show_alert=True)
+
+    logger.info("👁 %s: открыл сервер «%s»", _actor(call.from_user), server["name"])
 
     cached_text = await get_cached_status(key)
     if cached_text:
@@ -105,6 +103,8 @@ async def refresh_server_handler(call: types.CallbackQuery):
     server = servers.get(key)
     if not server:
         return await call.answer("Сервер не найден!", show_alert=True)
+
+    logger.info("🔃 %s: вручную обновил статус «%s»", _actor(call.from_user), server["name"])
 
     await call.message.edit_text("⏳ Обновляю данные...", reply_markup=None)
     report = await check_server(key, server)
@@ -170,16 +170,16 @@ async def clearchat_ask_phone(call: types.CallbackQuery, state: FSMContext):
     )
 
 
-async def process_cache_clear(user_id: int, phone: str, state: FSMContext,
+async def process_cache_clear(user: types.User, phone: str, state: FSMContext,
                               msg_to_edit: types.Message):
     data = await state.get_data()
     server_key = data.get("server_key")
     bot_id = data.get("bot_id")
 
-    USER_LAST_PHONE[user_id] = phone
+    USER_LAST_PHONE[user.id] = phone
     await state.clear()
 
-    result_text = await clear_cache(server_key, bot_id, phone)
+    result_text = await clear_cache(server_key, bot_id, phone, actor=_actor(user))
 
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад к ботам", callback_data=f"start_clearchat_{server_key}")
@@ -193,7 +193,7 @@ async def clearchat_execute_text(message: types.Message, state: FSMContext):
         return await message.answer("⚠️ Очистка кэша отменена.")
 
     status_msg = await message.answer("⏳ Очищаю кэш...")
-    await process_cache_clear(message.from_user.id, message.text, state, status_msg)
+    await process_cache_clear(message.from_user, message.text, state, status_msg)
 
 
 @router.callback_query(F.data == "cc_repeat_last", ClearChatState.waiting_for_phone)
@@ -203,4 +203,4 @@ async def clearchat_execute_button(call: types.CallbackQuery, state: FSMContext)
         return await call.answer("Кэш номера пуст, введите вручную", show_alert=True)
 
     await call.message.edit_text("⏳ Очищаю кэш...")
-    await process_cache_clear(call.from_user.id, phone, state, call.message)
+    await process_cache_clear(call.from_user, phone, state, call.message)
