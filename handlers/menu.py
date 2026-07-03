@@ -11,6 +11,7 @@ from services.names import get_bot_name
 from services.audit import actor_label
 from keyboards.reply import main_menu, back_to_main_kb, server_actions_menu
 from services import check_all_servers, check_server, clear_cache
+from utils.telegram import chunk_report
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -66,10 +67,23 @@ async def noop_handler(call: types.CallbackQuery):
 # --- ПРОВЕРКА ВСЕХ НОМЕРОВ (ОНЛАЙН) ---
 @router.callback_query(F.data == "check_all_now")
 async def check_all_handler(call: types.CallbackQuery):
+    # Сразу гасим "часики" на кнопке — сам скан может идти десятки секунд,
+    # и Telegram отменяет спиннер сам по себе, что выглядит как "зависание".
+    await call.answer()
     logger.info("📊 %s: запустил проверку статуса ВСЕХ серверов", _actor(call.from_user))
     await call.message.edit_text("⏳ Сканирую все сервера в реальном времени...", reply_markup=None)
     report = await check_all_servers()
-    await call.message.edit_text(report, reply_markup=back_to_main_kb())
+
+    # При 30+ серверах отчёт легко превышает лимит Telegram в 4096 символов —
+    # edit_text падает с TelegramBadRequest, и пользователь остаётся смотреть
+    # на "⏳ Сканирую...". Режем на части по границам блоков серверов.
+    chunks = chunk_report(report)
+    if not chunks:
+        return await call.message.edit_text("⚠️ Нет данных для отображения.", reply_markup=back_to_main_kb())
+
+    for part in chunks[:-1]:
+        await call.message.answer(part)
+    await call.message.edit_text(chunks[-1], reply_markup=back_to_main_kb())
 
 
 @router.callback_query(F.data.startswith("select_server_"))
@@ -80,6 +94,7 @@ async def server_menu_handler(call: types.CallbackQuery):
     if not server:
         return await call.answer("Сервер не найден!", show_alert=True)
 
+    await call.answer()
     logger.info("👁 %s: открыл сервер «%s»", _actor(call.from_user), server["name"])
 
     cached_text = await get_cached_status(key)
@@ -104,6 +119,7 @@ async def refresh_server_handler(call: types.CallbackQuery):
     if not server:
         return await call.answer("Сервер не найден!", show_alert=True)
 
+    await call.answer()
     logger.info("🔃 %s: вручную обновил статус «%s»", _actor(call.from_user), server["name"])
 
     await call.message.edit_text("⏳ Обновляю данные...", reply_markup=None)

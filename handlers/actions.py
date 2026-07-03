@@ -26,6 +26,7 @@ async def perform_restart(call: types.CallbackQuery, server_key, mode):
     if not server:
         return await call.answer("❌ Сервер не найден (возможно удален)", show_alert=True)
 
+    await call.answer()  # гасим "часики" сразу, пересборка может идти долго
     actor = _actor(call)
     cmd = f"cd {server['path']} && docker compose down && docker compose up -d --build"
 
@@ -54,6 +55,7 @@ async def perform_logs(call: types.CallbackQuery, server_key, bot_name):
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
 
+    await call.answer()
     actor = _actor(call)
     cmd = f"cd {server['path']} && docker compose logs --tail=300 {bot_name}"
 
@@ -108,6 +110,7 @@ async def perform_bot_restart(call: types.CallbackQuery, server_key, bot_name):
     if not server:
         return await call.answer("❌ Сервер не найден", show_alert=True)
 
+    await call.answer()
     actor = _actor(call)
     # МАГИЯ ЗДЕСЬ: Мы указываем {bot_name} в конце команды.
     # Docker поймет, что нужно пересобрать и запустить только этот сервис.
@@ -138,6 +141,7 @@ async def perform_unlink(call: types.CallbackQuery, server_key, bot_name):
     if not server:
         return await call.answer("❌ Сервер не найден", show_alert=True)
 
+    await call.answer()
     actor = _actor(call)
     # Отвязка необратимо удаляет сессию WhatsApp — самое деструктивное
     # действие в этом хендлере, логируем как warning.
@@ -182,6 +186,7 @@ async def list_bots_handler(call: types.CallbackQuery):
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
 
+    await call.answer()
     await call.message.edit_text(
         f"<b>{server['name']}</b> - Выберите бота:",
         reply_markup=bot_selection_menu(server, key)
@@ -197,6 +202,7 @@ async def list_restart_handler(call: types.CallbackQuery):
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
 
+    await call.answer()
     await call.message.edit_text(
         f"<b>{server['name']}</b> - Выберите контейнер для рестарта:",
         reply_markup=bot_restart_menu(server, key)
@@ -211,6 +217,7 @@ async def list_unlink_handler(call: types.CallbackQuery):
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
 
+    await call.answer()
     await call.message.edit_text(
         f"<b>{server['name']}</b>\n⚠️ Выберите бота для ОТВЯЗКИ WhatsApp.\n"
         f"<i>Текущая сессия будет безвозвратно удалена!</i>",

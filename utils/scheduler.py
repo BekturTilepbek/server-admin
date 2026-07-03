@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 TZ_GMT6 = timezone(timedelta(hours=6))
 SCAN_INTERVAL = 300  # 5 минут
 
+# Фоновый скан не должен занимать больше N SSH-соединений одновременно —
+# иначе при 30+ серверах он выедает весь thread pool, и кнопки оператора
+# (тоже идущие через asyncio.to_thread) встают в очередь за сканом.
+# Оставляем запас пула под интерактивные действия.
+SCAN_CONCURRENCY = 10
+
 # --- БИЛЛИНГ DO ---
 BILLING_DIGEST_HOUR = 10        # ежедневный дайджест в 10:00 по Бишкеку (GMT+6)
 BILLING_CHECK_INTERVAL = 1800   # проверка статуса на алерты каждые 30 минут
@@ -27,11 +33,17 @@ _BILLING_ALERTS_SENT: set[str] = set()
 async def update_statuses_task():
     """Бесконечный цикл обновления статусов всех серверов."""
     logger.info("⏳ Запущен планировщик проверки серверов...")
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _guarded_check(key: str, data: dict):
+        async with sem:
+            return await check_server(key, data)
+
     while True:
         try:
             servers = load_servers_sync()
             keys = list(servers.keys())
-            tasks = [check_server(k, servers[k]) for k in keys]
+            tasks = [_guarded_check(k, servers[k]) for k in keys]
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
