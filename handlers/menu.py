@@ -8,7 +8,7 @@ from services.store import load_servers_sync, get_cached_status
 from services.names import get_bot_name
 from keyboards.reply import main_menu, back_to_main_kb, server_actions_menu
 from services import check_all_servers, check_server, clear_cache
-from config import ADMIN_ID
+from utils.telegram import chunk_report
 
 router = Router()
 
@@ -61,7 +61,19 @@ async def noop_handler(call: types.CallbackQuery):
 async def check_all_handler(call: types.CallbackQuery):
     await call.message.edit_text("⏳ Сканирую все сервера в реальном времени...", reply_markup=None)
     report = await check_all_servers()
-    await call.message.edit_text(report, reply_markup=back_to_main_kb())
+
+    # Отчёт по 30+ серверам легко превышает лимит Telegram в 4096 символов
+    # (MESSAGE_TOO_LONG), поэтому режем на безопасные части по границам
+    # блоков "сервер-отчёт" и отправляем несколькими сообщениями.
+    chunks = chunk_report(report) or ["⚠️ Нет данных для отображения."]
+    last_index = len(chunks) - 1
+
+    for i, chunk in enumerate(chunks):
+        markup = back_to_main_kb() if i == last_index else None
+        if i == 0:
+            await call.message.edit_text(chunk, reply_markup=markup)
+        else:
+            await call.message.answer(chunk, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("select_server_"))
@@ -75,16 +87,13 @@ async def server_menu_handler(call: types.CallbackQuery):
     cached_text = await get_cached_status(key)
     if cached_text:
         text = f"{cached_text}\n\n<i>(Обновляется каждые 5 мин)</i>\n👇 Выберите действие:"
-        try:
-            await call.message.edit_text(text, reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID))
-        except Exception:
-            pass  # сообщение уже с этим контентом (двойной тап) — игнорируем
+        await call.message.edit_text(text, reply_markup=server_actions_menu(key))
     else:
         await call.message.edit_text(f"⏳ Сканирую {server['name']}...", reply_markup=None)
         report = await check_server(key, server)
         await call.message.edit_text(
             f"{report}\n\n👇 Выберите действие:",
-            reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID),
+            reply_markup=server_actions_menu(key),
         )
 
 
@@ -101,7 +110,7 @@ async def refresh_server_handler(call: types.CallbackQuery):
     report = await check_server(key, server)
     await call.message.edit_text(
         f"{report}\n\n👇 Выберите действие:",
-        reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID),
+        reply_markup=server_actions_menu(key),
     )
 
 
