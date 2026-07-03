@@ -81,9 +81,18 @@ async def check_all_handler(call: types.CallbackQuery):
     if not chunks:
         return await call.message.edit_text("⚠️ Нет данных для отображения.", reply_markup=back_to_main_kb())
 
+    # Удаляем сообщение "⏳ Сканирую..." и шлём ВСЕ чанки как новые сообщения
+    # подряд — только так они встают в правильном порядке сверху вниз.
+    # (edit_text первого чанка оставляет его на месте старого сообщения, выше
+    # остальных чанков, что переворачивает порядок серверов.)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
     for part in chunks[:-1]:
-        await call.message.answer(part)
-    await call.message.edit_text(chunks[-1], reply_markup=back_to_main_kb())
+        await call.bot.send_message(call.message.chat.id, part)
+    await call.bot.send_message(call.message.chat.id, chunks[-1], reply_markup=back_to_main_kb())
 
 
 @router.callback_query(F.data.startswith("select_server_"))
