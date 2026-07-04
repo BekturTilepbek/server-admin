@@ -27,6 +27,9 @@ npm-debug.log
 *.db
 *.sqlite3
 
+# Локальные бэкапы webhook_wb
+backups/
+
 # Архивы деплоя
 deploy.tar.gz
 *.tar.gz

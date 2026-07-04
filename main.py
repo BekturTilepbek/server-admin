@@ -11,6 +11,7 @@ from utils.scheduler import (
     clean_chromium_cache_job,
     billing_alert_task,
     billing_digest_task,
+    backup_webhooks_job,
 )
 from middlewares.auth import AuthMiddleware
 
@@ -83,6 +84,7 @@ async def main():
     spawn(clean_chromium_cache_job, "clean_chromium_cache")
     spawn(billing_alert_task, "billing_alert")
     spawn(billing_digest_task, "billing_digest")
+    spawn(backup_webhooks_job, "backup_webhooks")
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

@@ -6,9 +6,10 @@ from services.checker import check_server
 from services.store import load_servers_sync, save_cache
 from services.ssh import execute_command
 from services.billing import get_all_accounts_billing, format_digest, has_problem
+from services.backups import backup_one_server, cleanup_old_backups
 
 from loader import bot
-from config import GROUP_CHAT_ID
+from config import GROUP_CHAT_ID, BACKUP_HOUR
 
 logger = logging.getLogger(__name__)
 
@@ -202,3 +203,84 @@ async def billing_digest_task():
                 logger.info("✅ Ежедневный дайджест биллинга отправлен.")
         except Exception as e:
             logger.exception("Ошибка при отправке дайджеста биллинга: %s", e)
+
+# --------------------- РЕЗЕРВНОЕ КОПИРОВАНИЕ webhook_wb ---------------------
+
+BACKUP_CONCURRENCY = 4  # одновременных SFTP-скачиваний (бэкап тяжелее скана)
+
+
+async def backup_webhooks_job() -> None:
+    """Ежедневное резервное копирование webhook_wb в BACKUP_HOUR:00 (GMT+6)."""
+    while True:
+        now = datetime.now(TZ_GMT6)
+        target = now.replace(hour=BACKUP_HOUR, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+
+        sleep_sec = (target - now).total_seconds()
+        logger.info(
+            "⏳ Бэкап webhook_wb запланирован на %s (через %.2f ч)",
+            target.strftime("%Y-%m-%d %H:%M:%S"), sleep_sec / 3600,
+        )
+        await asyncio.sleep(sleep_sec)
+
+        logger.info("📦 Начинаю резервное копирование webhook_wb со всех серверов...")
+        servers = load_servers_sync()
+        if not servers:
+            logger.warning("Нет серверов для бэкапа.")
+            continue
+
+        sem = asyncio.Semaphore(BACKUP_CONCURRENCY)
+
+        async def _one(key: str, data: dict) -> tuple[str, bool, str]:
+            async with sem:
+                ok, info = await asyncio.to_thread(backup_one_server, key, data)
+                return key, ok, info
+
+        tasks = [_one(k, servers[k]) for k in servers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        lines: list[str] = []
+        ok_count = 0
+        for res in results:
+            if isinstance(res, Exception):
+                logger.error("Бэкап: неожиданная ошибка: %s", res)
+                lines.append(f"❌ <b>?</b>: {res}")
+                continue
+            key, ok, info = res
+            name = servers[key].get("name", servers[key].get("ip", key))
+            icon = "✅" if ok else "❌"
+            if ok:
+                ok_count += 1
+            lines.append(f"{icon} <b>{name}</b>: {info}")
+
+        # Cleanup старых архивов
+        try:
+            removed = await asyncio.to_thread(cleanup_old_backups)
+            if removed:
+                lines.append(f"\n🧹 Удалено устаревших архивов: {removed}")
+        except Exception as e:
+            logger.error("Ошибка очистки старых бэкапов: %s", e)
+
+        # Отчёт в группу
+        header = f"📦 <b>Бэкап webhook_wb завершён:</b> {ok_count}/{len(servers)} серверов\n"
+        full_report = header + "\n".join(lines)
+
+        # Чанкуем под лимит Telegram (4096 символов)
+        chunk, buf = [], ""
+        for line in full_report.split("\n"):
+            if len(buf) + len(line) + 1 > 4000:
+                chunk.append(buf)
+                buf = line
+            else:
+                buf = f"{buf}\n{line}" if buf else line
+        if buf:
+            chunk.append(buf)
+
+        for part in chunk:
+            try:
+                await bot.send_message(chat_id=GROUP_CHAT_ID, text=part)
+            except Exception as e:
+                logger.error("Не удалось отправить отчёт о бэкапе: %s", e)
+
+        logger.info("🏁 Резервное копирование webhook_wb завершено (%d/%d).", ok_count, len(servers))

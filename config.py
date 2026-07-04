@@ -59,3 +59,13 @@ def _parse_do_accounts(raw: str) -> list[tuple[str, str]]:
 DO_ACCOUNTS: list[tuple[str, str]] = _parse_do_accounts(
     os.environ.get("DO_ACCOUNTS", "")
 )
+
+# --- РЕЗЕРВНОЕ КОПИРОВАНИЕ webhook_wb ---
+# Куда складывать архивы внутри контейнера (том ./backups:/app/backups в docker-compose.yml).
+BACKUP_DIR: str = "/app/backups"
+
+# Час запуска бэкапа по Бишкеку (GMT+6), 0-23.
+BACKUP_HOUR: int = 3
+
+# Сколько дней хранить архивы (0 = вечно).
+BACKUP_RETENTION_DAYS: int = 7
