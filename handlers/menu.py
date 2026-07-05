@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from config import ADMIN_ID
 from services.store import load_servers_sync, get_cached_status
 from services.names import get_bot_name
 from services.audit import actor_label
@@ -106,16 +107,17 @@ async def server_menu_handler(call: types.CallbackQuery):
     await call.answer()
     logger.info("👁 %s: открыл сервер «%s»", _actor(call.from_user), server["name"])
 
+    is_admin = call.from_user.id == ADMIN_ID
     cached_text = await get_cached_status(key)
     if cached_text:
         text = f"{cached_text}\n\n<i>(Обновляется каждые 5 мин)</i>\n👇 Выберите действие:"
-        await call.message.edit_text(text, reply_markup=server_actions_menu(key))
+        await call.message.edit_text(text, reply_markup=server_actions_menu(key, is_admin=is_admin))
     else:
         await call.message.edit_text(f"⏳ Сканирую {server['name']}...", reply_markup=None)
         report = await check_server(key, server)
         await call.message.edit_text(
             f"{report}\n\n👇 Выберите действие:",
-            reply_markup=server_actions_menu(key),
+            reply_markup=server_actions_menu(key, is_admin=is_admin),
         )
 
 
@@ -135,7 +137,7 @@ async def refresh_server_handler(call: types.CallbackQuery):
     report = await check_server(key, server)
     await call.message.edit_text(
         f"{report}\n\n👇 Выберите действие:",
-        reply_markup=server_actions_menu(key),
+        reply_markup=server_actions_menu(key, is_admin=call.from_user.id == ADMIN_ID),
     )
 
 

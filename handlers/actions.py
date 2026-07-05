@@ -4,10 +4,11 @@ from aiogram import Router, types, F
 import html
 import re
 
+from config import ADMIN_ID
 from services.store import load_servers_sync
 from services.ssh import execute_command
 from services.audit import actor_label
-from keyboards.reply import bot_selection_menu, server_actions_menu, bot_restart_menu, bot_unlink_menu
+from keyboards.reply import bot_selection_menu, server_actions_menu, bot_unlink_menu
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 def _actor(call: types.CallbackQuery) -> str:
     return actor_label(call.from_user.id, call.from_user.full_name)
+
+
+def _is_admin(call: types.CallbackQuery) -> bool:
+    return call.from_user.id == ADMIN_ID
 
 
 # --- Вспомогательные функции ---
@@ -41,10 +46,10 @@ async def perform_restart(call: types.CallbackQuery, server_key, mode):
     else:
         logger.error("❌ %s: ошибка перезапуска сервера «%s»: %s", actor, server["name"], err)
 
-    result = "✅ Успешно перезапущен!" if status == 0 else f"❌ Ошибка:\n{err}"
+    result = "✅ Успешно перезапущен!" if status == 0 else f"❌ Ошибка:\n{html.escape(err)}"
     await call.message.edit_text(
         f"<b>{server['name']}</b>: {result}",
-        reply_markup=server_actions_menu(server_key)
+        reply_markup=server_actions_menu(server_key, is_admin=_is_admin(call))
     )
 
 
@@ -103,37 +108,6 @@ async def perform_logs(call: types.CallbackQuery, server_key, bot_name):
         )
 
 
-async def perform_bot_restart(call: types.CallbackQuery, server_key, bot_name):
-    servers = load_servers_sync()
-    server = servers.get(server_key)
-
-    if not server:
-        return await call.answer("❌ Сервер не найден", show_alert=True)
-
-    await call.answer()
-    actor = _actor(call)
-    # МАГИЯ ЗДЕСЬ: Мы указываем {bot_name} в конце команды.
-    # Docker поймет, что нужно пересобрать и запустить только этот сервис.
-    cmd = f"cd {server['path']} && docker compose up -d --build {bot_name}"
-
-    logger.info("🔄 %s: бот «%s» на сервере «%s» перезапускается", actor, bot_name, server["name"])
-    await call.message.edit_text(f"⏳ Перезапускаю <b>{bot_name}</b>...")
-
-    status, out, err = await asyncio.to_thread(execute_command, server, cmd)
-
-    if status == 0:
-        logger.info("✅ %s: бот «%s» на «%s» перезапущен успешно", actor, bot_name, server["name"])
-    else:
-        logger.error("❌ %s: ошибка перезапуска бота «%s» на «%s»: %s", actor, bot_name, server["name"], err)
-
-    result = "✅ Успешно перезапущен!" if status == 0 else f"❌ Ошибка:\n<pre>{err}</pre>"
-
-    await call.message.edit_text(
-        f"<b>{server['name']} - {bot_name}</b>: {result}",
-        reply_markup=server_actions_menu(server_key)
-    )
-
-
 async def perform_unlink(call: types.CallbackQuery, server_key, bot_name):
     servers = load_servers_sync()
     server = servers.get(server_key)
@@ -171,7 +145,53 @@ async def perform_unlink(call: types.CallbackQuery, server_key, bot_name):
 
     await call.message.edit_text(
         result,
-        reply_markup=server_actions_menu(server_key)
+        reply_markup=server_actions_menu(server_key, is_admin=_is_admin(call))
+    )
+
+
+async def perform_full_rebuild(call: types.CallbackQuery, server_key):
+    """Полная пересборка без кэша (только для админа).
+
+    Порядок: down -> build --no-cache -> up -d. Сборка может идти несколько
+    минут, поэтому SSH-команде даём расширенный таймаут (900с).
+    """
+    if not _is_admin(call):
+        return await call.answer("⛔️ Только для администратора", show_alert=True)
+
+    servers = load_servers_sync()
+    server = servers.get(server_key)
+
+    if not server:
+        return await call.answer("❌ Сервер не найден (возможно удален)", show_alert=True)
+
+    await call.answer()
+    actor = _actor(call)
+    cmd = (
+        f"cd {server['path']} && "
+        f"docker compose down && "
+        f"docker compose build --no-cache && "
+        f"docker compose up -d"
+    )
+
+    logger.warning("♻️ %s: запустил ПОЛНЫЙ рестарт без кэша на «%s»", actor, server["name"])
+    await call.message.edit_text(
+        f"⏳ Полный рестарт <b>{server['name']}</b> без кэша...\n"
+        f"<i>Пересборка образов может занять несколько минут, подождите.</i>"
+    )
+
+    # Расширенный таймаут (15 минут) — обычного 60с не хватит на --no-cache.
+    status, out, err = await asyncio.to_thread(execute_command, server, cmd, 900)
+
+    if status == 0:
+        logger.info("✅ %s: «%s» пересобран без кэша успешно", actor, server["name"])
+        result = "✅ Образы пересобраны без кэша и контейнеры перезапущены!"
+    else:
+        logger.error("❌ %s: ошибка пересборки без кэша «%s»: %s", actor, server["name"], err)
+        result = f"❌ Ошибка:\n<pre>{html.escape(err)}</pre>"
+
+    await call.message.edit_text(
+        f"<b>{server['name']}</b>: {result}",
+        reply_markup=server_actions_menu(server_key, is_admin=True)
     )
 
 # --- Хендлеры ---
@@ -190,22 +210,6 @@ async def list_bots_handler(call: types.CallbackQuery):
     await call.message.edit_text(
         f"<b>{server['name']}</b> - Выберите бота:",
         reply_markup=bot_selection_menu(server, key)
-    )
-
-@router.callback_query(F.data.startswith('list_restart_'))
-async def list_restart_handler(call: types.CallbackQuery):
-    key = call.data.split('_', 2)[2]
-
-    servers = load_servers_sync()
-    server = servers.get(key)
-
-    if not server:
-        return await call.answer("Сервер не найден", show_alert=True)
-
-    await call.answer()
-    await call.message.edit_text(
-        f"<b>{server['name']}</b> - Выберите контейнер для рестарта:",
-        reply_markup=bot_restart_menu(server, key)
     )
 
 @router.callback_query(F.data.startswith('list_unlink_'))
@@ -227,8 +231,7 @@ async def list_unlink_handler(call: types.CallbackQuery):
 
 # Обработка действий
 @router.callback_query(F.data.func(
-    lambda data: data.startswith('run_') or data.startswith('runbot_') or data.startswith(
-        'unlink_') or 'getlogs_' in data))
+    lambda data: data.startswith('run_') or data.startswith('unlink_') or 'getlogs_' in data))
 async def execute_handler(call: types.CallbackQuery):
     if 'getlogs_' in call.data:
         parts = call.data.split('_', 2)
@@ -238,9 +241,9 @@ async def execute_handler(call: types.CallbackQuery):
         parts = call.data.split('_', 2)
         await perform_restart(call, parts[2], "normal")
 
-    elif call.data.startswith('runbot_'):
+    elif call.data.startswith('run_nocache_'):
         parts = call.data.split('_', 2)
-        await perform_bot_restart(call, parts[2], parts[1])
+        await perform_full_rebuild(call, parts[2])
 
     elif call.data.startswith('unlink_'):
         # Формат: unlink_bot1_137.184.14.83
