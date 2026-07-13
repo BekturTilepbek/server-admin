@@ -9,7 +9,10 @@ from config import ADMIN_ID
 from keyboards import back_to_main_kb
 from services.store import load_servers_sync, save_server
 from services.audit import actor_label
-from services.billing import get_all_accounts_billing, format_digest
+from services.billing import (
+    get_all_accounts_billing, format_digest, fetch_billing_history, format_history,
+)
+from config import DO_ACCOUNTS
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -33,6 +36,27 @@ async def show_billing(call: types.CallbackQuery):
     await call.message.edit_text(
         format_digest(accounts), reply_markup=back_to_main_kb()
     )
+
+
+@router.message(Command("billing_history"))
+async def billing_history_cmd(message: types.Message):
+    """История биллинга (инвойсы + платежи) по всем аккаунтам DO. Только админ."""
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    if not DO_ACCOUNTS:
+        return await message.answer("⚠️ DO_ACCOUNTS не настроен в .env.")
+
+    actor = actor_label(message.from_user.id, message.from_user.full_name)
+    logger.info("📜 %s: запросил историю биллинга DigitalOcean", actor)
+
+    await message.answer("⏳ Загружаю историю биллинга...")
+    for label, token in DO_ACCOUNTS:
+        res = await fetch_billing_history(label, token)
+        if res["ok"]:
+            await message.answer(format_history(label, res["entries"]))
+        else:
+            await message.answer(f"📜 <b>{label}</b>\n❌ Ошибка: {res['error']}")
 
 
 @router.callback_query(F.data == "get_bot_sys_logs")

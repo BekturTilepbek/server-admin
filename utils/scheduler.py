@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from services.checker import check_server
 from services.store import load_servers_sync, save_cache
 from services.ssh import execute_command
-from services.billing import get_all_accounts_billing, format_digest, has_problem
+from services.billing import get_all_accounts_billing, format_digest, has_problem, format_account_block
 from services.backups import backup_one_server, cleanup_old_backups
 
 from loader import bot
@@ -115,12 +115,14 @@ async def clean_chromium_cache_job():
 
 async def _send_billing_alerts(accounts: list[dict]) -> None:
     """
-    Шлёт алерт по каждому проблемному аккаунту (задолженность или не опросился).
-    Антиспам: повторно по тому же аккаунту не шлём, пока долг не исчезнет.
+    Шлёт алерт по каждому проблемному аккаунту (долг / неясный статус / не опросился).
+    Текст блока берётся из services.billing.format_account_block — той же функции,
+    что рендерит ежедневный дайджест, чтобы формулировки не расходились между собой.
+    Антиспам: повторно по тому же аккаунту не шлём, пока проблема не исчезнет.
     """
     for acc in accounts:
         label = acc["label"]
-        problem = (not acc["ok"]) or (acc["balance_status"] == "debt")
+        problem = (not acc["ok"]) or (acc["balance_status"] in ("debt", "unknown"))
 
         if not problem:
             _BILLING_ALERTS_SENT.discard(label)
@@ -129,29 +131,17 @@ async def _send_billing_alerts(accounts: list[dict]) -> None:
         if label in _BILLING_ALERTS_SENT:
             continue  # уже предупреждали
 
-        if not acc["ok"]:
-            reason = f"не удалось опросить аккаунт ({acc['error']})"
-        else:
-            from services.billing import _money  # локальный импорт, без цикла
-            reason = (
-                f"есть задолженность <b>{_money(acc['account_balance'])}</b> — "
-                f"списание не прошло, аккаунт может быть заблокирован"
-            )
-
         msg = (
             f"🚨 <b>Биллинг DigitalOcean: внимание!</b>\n\n"
-            f"📧 <b>Аккаунт:</b> {label}\n"
-            f"⚠️ {reason}\n"
+            f"{format_account_block(acc)}"
         )
-        if acc["ok"]:
-            from services.billing import _money
+        if acc["ok"] and acc["balance_status"] == "debt":
             msg += (
-                f"💸 Потрачено за месяц: <b>{_money(acc['month_to_date'])}</b>\n\n"
-                f"❗️ Срочно оплатите задолженность в личном кабинете DO, "
-                f"чтобы избежать остановки серверов."
+                "\n\n❗️ Срочно оплатите счёт в личном кабинете DO, "
+                "чтобы избежать остановки серверов."
             )
-        else:
-            msg += "\n❗️ Проверьте токен и доступность аккаунта."
+        elif not acc["ok"]:
+            msg += "\n\n❗️ Проверьте токен и доступность аккаунта."
 
         try:
             await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
