@@ -278,7 +278,7 @@ def _invoice_period_name(invoice_dt: datetime) -> str:
 
 def _week_boundaries(year: int, month: int) -> tuple[int, int]:
     """
-    Возвращает (день_начала_2й_недели, день_начала_3й_недели) месяца,
+    Возвращает (день_начала_3й_недели, день_начала_4й_недели) месяца,
     используя настоящий календарь (недели Пн-Вс), а не фиксированное число.
 
     ВАЖНО: DigitalOcean официально НЕ публикует точные сроки перехода
@@ -289,26 +289,26 @@ def _week_boundaries(year: int, month: int) -> tuple[int, int]:
     (https://docs.digitalocean.com/platform/billing/late-payments/)
 
     Поэтому мы НЕ считаем точную дату, а даём ОЦЕНОЧНЫЙ диапазон на основе
-    наблюдений владельца аккаунтов (обычно 2-3 неделя месяца).
+    наблюдений владельца аккаунтов (обычно 3-4 неделя месяца).
     """
     weeks = calendar.monthcalendar(year, month)  # список недель, Пн — первый день
     # Начиная со 2-й строки (индекс 1) все недели полные и гарантированно
     # существуют в пределах месяца (в любом месяце минимум 4 полных недели).
-    week2_start = weeks[1][0]
     week3_start = weeks[2][0]
-    return week2_start, week3_start
+    week4_start = weeks[3][0]
+    return week3_start, week4_start
 
 
 def _invoice_deadline_range(invoice_dt: datetime) -> tuple[datetime, datetime]:
     """
-    Оценочный диапазон [начало 2-й недели, начало 3-й недели] месяца,
+    Оценочный диапазон [начало 3-й недели, начало 4-й недели] месяца,
     в котором выставлен инвойс (по времени Бишкека). Это ОЦЕНКА по
     наблюдениям, а не гарантированная дата — DO не публикует точные сроки.
     """
     local = _to_local(invoice_dt)
-    d2, d3 = _week_boundaries(local.year, local.month)
-    start = local.replace(day=d2, hour=0, minute=0, second=0, microsecond=0)
-    end = local.replace(day=d3, hour=0, minute=0, second=0, microsecond=0)
+    d3, d4 = _week_boundaries(local.year, local.month)
+    start = local.replace(day=d3, hour=0, minute=0, second=0, microsecond=0)
+    end = local.replace(day=d4, hour=0, minute=0, second=0, microsecond=0)
     return start, end
 
 def format_account_block(acc: dict) -> str:
