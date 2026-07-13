@@ -1,0 +1,20 @@
+# Резервные копии webhook_wb — монтируются через том в docker-compose.yml,
+# в образ не входят. Без этой строки Docker тащит все .zip в build context.
+backups/
+
+# Секреты и данные — тоже монтируются через тома, не копируются в образ.
+.env
+data/
+
+# Сессии и временные файлы
+sessions/
+__pycache__/
+*.py[cod]
+*.log
+
+# Локальные инструменты
+.venv/
+venv/
+.idea/
+.vscode/
+deploy.tar.gz
