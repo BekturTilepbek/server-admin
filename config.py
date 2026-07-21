@@ -68,4 +68,10 @@ BACKUP_DIR: str = "/app/backups"
 BACKUP_HOUR: int = 3
 
 # Сколько дней хранить архивы (0 = вечно).
-BACKUP_RETENTION_DAYS: int = 7
+BACKUP_RETENTION_DAYS: int = 3
+
+# --- Параметры БД для бэкапа (pg_dump) ---
+# Совпадают с тем, что уже захардкожено в services/db.py (clear_cache).
+DB_CONTAINER: str = "whatsapp-postgres"
+DB_USER: str = "adminbek"
+DB_NAME: str = "moidb"

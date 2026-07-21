@@ -19,15 +19,15 @@
         .env
         ...
 
-Что бэкапируется:
-  - Весь server['path'] рекурсивно, КРОМЕ папки sessions/ и её содержимого.
-  - Вместо реальной sessions/ в архив добавляется пустая папка sessions/
-    (как маркер того, что она существует, без гигабайтов сессий Chromium).
+Что бэкапируется — ОДИН zip на сервер в день:
 
-Результат: один zip на сервер в день:
-    <IP>_webhook_wb_<YYYY-MM-DD>.zip
+    <IP>_backup_<YYYY-MM-DD>.zip
+        webhook_wb/              <- весь проект, кроме sessions/*
+            sessions/            <- пустая (без живых сессий ботов)
+            ...
+        moidb_<YYYY-MM-DD>.dump  <- дамп PostgreSQL (pg_restore -F c)
 
-Архивы хранятся BACKUP_RETENTION_DAYS дней, затем удаляются автоматически.
+Архив хранится BACKUP_RETENTION_DAYS дней, затем удаляется автоматически.
 Синхронные функции всегда вызываются через asyncio.to_thread(...).
 """
 import os
@@ -40,7 +40,7 @@ from datetime import datetime
 
 import paramiko
 
-from config import BACKUP_DIR, BACKUP_RETENTION_DAYS
+from config import BACKUP_DIR, BACKUP_RETENTION_DAYS, DB_CONTAINER, DB_USER, DB_NAME
 from services.ssh import CONNECT_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 # Имя папки сессий относительно server['path'] — не скачиваем содержимое,
 # но добавляем как пустую запись в архив.
 SESSIONS_SUBDIR = "sessions"
+
+# Имя папки внутри zip, куда кладём весь проект (соответствует названию
+# папки на сервере — так привычнее ориентироваться после распаковки).
+ARC_PROJECT_DIR = "webhook_wb"
 
 
 def _open_sftp(server_data: dict) -> tuple[paramiko.SSHClient, paramiko.SFTPClient]:
@@ -111,10 +115,64 @@ def _download_tree(
     return count
 
 
+def _exec_on_client(client: paramiko.SSHClient, cmd: str, timeout: int = 120) -> tuple[int, str, str]:
+    """
+    Выполняет команду на УЖЕ открытом SSH-клиенте (без нового подключения) —
+    используется для pg_dump/docker cp/cleanup рядом со скачиванием файлов
+    через тот же клиент, чтобы не плодить лишние SSH-соединения.
+    """
+    stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+    stdout.channel.settimeout(timeout)
+    exit_status = stdout.channel.recv_exit_status()
+    out = stdout.read().decode("utf-8", errors="ignore")
+    err = stderr.read().decode("utf-8", errors="ignore")
+    return exit_status, out, err
+
+
+def _dump_database_into(
+    client: paramiko.SSHClient,
+    sftp: paramiko.SFTPClient,
+    local_dump_path: str,
+    safe_ip: str,
+    date_str: str,
+) -> tuple[bool, str]:
+    """
+    Делает pg_dump БД внутри контейнера DB_CONTAINER, копирует дамп из
+    контейнера на хост сервера (docker cp), скачивает его локально в
+    local_dump_path через уже открытый sftp, затем чистит временный файл
+    на сервере (и в контейнере, и на хосте). Возвращает (успех, сообщение).
+    """
+    remote_tmp = f"/tmp/{DB_NAME}_{safe_ip}_{date_str}.dump"
+
+    dump_cmd = (
+        f"docker exec {DB_CONTAINER} pg_dump -U {DB_USER} -d {DB_NAME} -F c -f {remote_tmp} && "
+        f"docker cp {DB_CONTAINER}:{remote_tmp} {remote_tmp} && "
+        f"docker exec {DB_CONTAINER} rm -f {remote_tmp}"
+    )
+
+    status, out, err = _exec_on_client(client, dump_cmd)
+    if status != 0:
+        return False, f"pg_dump не удался: {err.strip() or out.strip()}"
+
+    try:
+        sftp.get(remote_tmp, local_dump_path)
+    finally:
+        # Чистим временный файл на хосте сервера в любом случае
+        _exec_on_client(client, f"rm -f {remote_tmp}")
+
+    size_mb = os.path.getsize(local_dump_path) / (1024 * 1024)
+    return True, f"{os.path.basename(local_dump_path)} ({size_mb:.1f} МБ)"
+
+
 def backup_one_server(server_key: str, server_data: dict) -> tuple[bool, str]:
     """
-    Синхронно: скачивает весь server['path'] (webhook_wb), кроме sessions/,
-    пакует в zip. В архив добавляется пустая папка sessions/.
+    Синхронно: скачивает весь server['path'] (webhook_wb, кроме sessions/)
+    и дамп БД, пакует ОБА в ОДИН zip:
+
+        <IP>_backup_<дата>.zip
+            webhook_wb/...
+            moidb_<дата>.dump
+
     Возвращает (успех, сообщение для отчёта).
     ВАЖНО: вызывать через asyncio.to_thread(...).
     """
@@ -128,7 +186,7 @@ def backup_one_server(server_key: str, server_data: dict) -> tuple[bool, str]:
     os.makedirs(BACKUP_DIR, exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
     safe_ip = ip.replace(".", "-")
-    zip_name = f"{safe_ip}_webhook_wb_{date_str}.zip"
+    zip_name = f"{safe_ip}_backup_{date_str}.zip"
     zip_path = os.path.join(BACKUP_DIR, zip_name)
 
     client = sftp = tmp_root = None
@@ -138,23 +196,33 @@ def backup_one_server(server_key: str, server_data: dict) -> tuple[bool, str]:
         if not _remote_exists(sftp, remote_root):
             return False, f"папка не найдена: {remote_root}"
 
-        tmp_root = tempfile.mkdtemp(prefix=f"wb_{safe_ip}_")
+        tmp_root = tempfile.mkdtemp(prefix=f"bk_{safe_ip}_")
+        project_local = os.path.join(tmp_root, ARC_PROJECT_DIR)
 
-        # Скачиваем всё, пропуская sessions/ целиком
-        files = _download_tree(sftp, remote_root, tmp_root, skip_dirs={sessions_remote})
+        # 1. Скачиваем весь проект, пропуская sessions/ целиком
+        files = _download_tree(sftp, remote_root, project_local, skip_dirs={sessions_remote})
 
-        # Добавляем пустую папку sessions/ в локальный tmp (попадёт в архив)
-        os.makedirs(os.path.join(tmp_root, SESSIONS_SUBDIR), exist_ok=True)
+        # Добавляем пустую папку sessions/ внутри webhook_wb/ (попадёт в архив)
+        os.makedirs(os.path.join(project_local, SESSIONS_SUBDIR), exist_ok=True)
 
-        # Пишем .part, затем атомарно переименовываем
+        # 2. Дамп БД — файлом рядом с webhook_wb/ внутри того же tmp_root,
+        # чтобы попасть в тот же итоговый zip.
+        dump_filename = f"{DB_NAME}_{date_str}.dump"
+        dump_local_path = os.path.join(tmp_root, dump_filename)
+        try:
+            db_ok, db_msg = _dump_database_into(client, sftp, dump_local_path, safe_ip, date_str)
+        except Exception as e:  # noqa: BLE001 — не роняем файловый бэкап из-за проблем с БД
+            logger.warning("Дамп БД для %s не удался: %s", ip, e)
+            db_ok, db_msg = False, f"ошибка: {e}"
+
+        # 3. Пакуем всё (webhook_wb/ + дамп, если он получился) в один zip
         part_path = zip_path + ".part"
         with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, dirs, filenames in os.walk(tmp_root):
-                # Пустые папки явно добавляем через ZipInfo
                 for d in dirs:
                     full = os.path.join(root, d)
-                    arcname = os.path.relpath(full, tmp_root) + "/"
-                    if not os.listdir(full):  # добавляем только если реально пустая
+                    if not os.listdir(full):  # пустые папки добавляем явной записью
+                        arcname = os.path.relpath(full, tmp_root) + "/"
                         zf.mkdir(arcname) if hasattr(zf, "mkdir") else zf.writestr(
                             zipfile.ZipInfo(arcname), ""
                         )
@@ -165,11 +233,15 @@ def backup_one_server(server_key: str, server_data: dict) -> tuple[bool, str]:
         os.replace(part_path, zip_path)
 
         size_mb = os.path.getsize(zip_path) / (1024 * 1024)
-        return True, f"{zip_name} ({files} файлов, {size_mb:.1f} МБ)"
+        icon = "✅" if db_ok else "❌"
+        combined = (
+            f"{zip_name} ({files} файлов проекта, {size_mb:.1f} МБ)\n"
+            f"   🗄 БД: {icon} {db_msg}"
+        )
+        return True, combined
 
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Бэкап webhook_wb для %s не удался: %s", ip, e)
-        # Чистим недописанный архив, если он есть
+    except Exception as e:  # noqa: BLE001 — не роняем весь батч из-за одного сервера
+        logger.warning("Бэкап для %s не удался: %s", ip, e)
         for p in (zip_path + ".part", zip_path):
             try:
                 if os.path.exists(p):
@@ -189,7 +261,7 @@ def backup_one_server(server_key: str, server_data: dict) -> tuple[bool, str]:
 
 
 def cleanup_old_backups() -> int:
-    """Удаляет архивы старше BACKUP_RETENTION_DAYS дней. Возвращает кол-во удалённых."""
+    """Удаляет .zip архивы старше BACKUP_RETENTION_DAYS дней. Возвращает кол-во удалённых."""
     if BACKUP_RETENTION_DAYS <= 0 or not os.path.isdir(BACKUP_DIR):
         return 0
 
