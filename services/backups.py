@@ -31,6 +31,7 @@
 Синхронные функции всегда вызываются через asyncio.to_thread(...).
 """
 import os
+import re
 import shutil
 import logging
 import zipfile
@@ -261,20 +262,59 @@ def backup_one_server(server_key: str, server_data: dict) -> tuple[bool, str]:
 
 
 def cleanup_old_backups() -> int:
-    """Удаляет .zip архивы старше BACKUP_RETENTION_DAYS дней. Возвращает кол-во удалённых."""
+    """
+    Удаляет старые .zip старше BACKUP_RETENTION_DAYS дней — но НЕ трогает
+    последний (самый свежий) архив каждого сервера, даже если он старше
+    retention. Это защищает единственную копию сервера, который перестал
+    быть доступен (упал/выключен/недоступен по SSH) — раз новых бэкапов
+    для него больше не появляется, старый архив не должен исчезнуть просто
+    потому что "прошло 3 дня".
+
+    Пример:
+        Сервер А бэкапится каждый день -> в папке лежат его архивы за
+        последние 3 дня, старые за пределами retention удаляются как обычно.
+
+        Сервер Б стал недоступен 5 дней назад -> новых архивов для Б не
+        появляется, значит единственный оставшийся архив Б (5-дневной
+        давности) — он же самый свежий для группы "Б" -> НЕ удаляется,
+        сколько бы дней ни прошло. Как только Б снова станет доступен и
+        появится новый архив, старый (уже не самый свежий) начнёт
+        подчищаться по retention как обычно.
+
+    Возвращает количество удалённых файлов.
+    """
     if BACKUP_RETENTION_DAYS <= 0 or not os.path.isdir(BACKUP_DIR):
         return 0
 
     cutoff = datetime.now().timestamp() - BACKUP_RETENTION_DAYS * 86400
-    removed = 0
+
+    # Группируем файлы по серверу: "146-190-129-105_backup_2026-07-21.zip"
+    # -> ключ группы "146-190-129-105".
+    groups: "dict[str, list[str]]" = {}
     for fn in os.listdir(BACKUP_DIR):
-        if not fn.endswith(".zip"):
+        m = re.match(r"^(.+)_backup_\d{4}-\d{2}-\d{2}\.zip$", fn)
+        if not m:
             continue
-        full = os.path.join(BACKUP_DIR, fn)
-        try:
-            if os.path.getmtime(full) < cutoff:
-                os.remove(full)
-                removed += 1
-        except OSError:
-            continue
+        groups.setdefault(m.group(1), []).append(fn)
+
+    removed = 0
+    for safe_ip, files in groups.items():
+        # Сортируем по времени изменения файла, самый свежий — первым.
+        files_sorted = sorted(
+            files,
+            key=lambda f: os.path.getmtime(os.path.join(BACKUP_DIR, f)),
+            reverse=True,
+        )
+        # files_sorted[0] — самый свежий архив этого сервера, его никогда
+        # не удаляем, даже если он старше cutoff. Проверяем на удаление
+        # только всё, что старше него в той же группе.
+        for fn in files_sorted[1:]:
+            full = os.path.join(BACKUP_DIR, fn)
+            try:
+                if os.path.getmtime(full) < cutoff:
+                    os.remove(full)
+                    removed += 1
+            except OSError:
+                continue
+
     return removed
